@@ -1,0 +1,615 @@
+## [2.0.16] - 2026-11-12
+
+**Compatibility note:** This version is compatible from **Moodle 5.0** to **Moodle 5.3**. Requires `aiprovider_datacurso` 2.2.0 (2026110900) or later.
+
+## Changed
+
+- **The declared compatibility is Moodle 5.0 to Moodle 5.3**
+  `$plugin->requires` is now Moodle 5.0 (`2025041400`) and `$plugin->supported` is `[500, 503]`, the same range as `aiprovider_datacurso` 2.2.0 and later, which this version requires. Moodle 4.5 sites keep the `MOODLE_405_STABLE` branch. No test applies.
+
+## Removed
+
+- **The GitHub workflows are removed**
+  The release workflow (`.github/workflows/moodle-release.yml`) interpolated the release tag inside its shell script, the pattern reported as AIP-SEC-004 and CDR-SEC-003 (High) in other plugins of the suite. The continuous integration and the release of the plugin run on Jenkins, so the whole `.github` folder is removed instead of fixed. Test: none, the change removes files
+
+## Fixed
+
+- **The provider dependency names the first Moodle 5.x provider that keeps the plugin state**
+  The plugin required `aiprovider_datacurso` 2026110400, the version of 1.7.0 on Moodle 4.5. On Moodle 5.x the provider versions after it and before 2.2.0 (2026110900), such as 2.1.11 (2026110500), satisfied that requirement without the `plugin_settings` class that keeps the plugin state, so the plugin stayed disabled with no upgrade asked for. The dependency is now 2026110900. No test applies.
+- **The text a person wrote no longer outlives their deletion (Mindfree, LCG-PRIV-004)**
+  When a user was deleted, by a Privacy API request or in Moodle, the custom prompt they wrote for a course stayed in `local_coursegen_course_context.prompt_text`, only losing the reference to its author; and deleting a user in Moodle, which does not run the Privacy API, removed nothing at all. `\local_coursegen\local\service\user_data_eraser` now erases what the plugin keeps of a person, for the Privacy API and for a new `\core\event\user_deleted` observer: the planning sessions with their syllabus files, the module jobs, and the custom prompt of every course whose prompt they last saved (the course is then no longer a usable AI context until a teacher writes a prompt again). A Privacy API deletion of a whole course also erases its prompt, and one for some users of a course erases only the prompt they wrote there. The system instructions are kept on purpose: administrators write them as institutional configuration that every course of the site may use, so only the reference to the person who last edited them is removed; the Privacy API metadata now declares both behaviours. Tests: `tests/privacy_user_text_test.php`
+- **What the course service keeps of a person or a course is exported and deleted with them (Mindfree, LCG-PRIV-001)**
+  The prompt, the conversation, the generated content and the files the Datacurso course service keeps for each planning session and activity generation had no lifecycle the plugin could act on. The service now exports and deletes them on request (`/privacy/export`, `/privacy/delete`, only for the threads of this plugin on this site), applies a retention of 30 days by default, and keeps personal data out of its logs (python_course_ai-v2, `docs/PRIVACY_data_lifecycle.md`). The plugin asks for them: every deletion (a Privacy API request for a user or a course, a deleted user, a deleted course) queues the new adhoc task `\local_coursegen\task\erase_remote_data` with the ids of the sessions and jobs it held and, for a person, the person, before the local rows go; a failed call makes the task run again later. The export of a user includes what the service keeps of them, or says that the service could not be reached. `\local_coursegen\local\service\remote_data_service` makes both calls, and the Privacy API metadata declares the retention and the new `thread_ids` field. Tests: `tests/privacy_remote_data_test.php` (deleted user, Privacy API deletion of a course, of a user in a course and of some users of a course, deleted course, course without sessions, retry of a failed deletion, export, export with the service unreachable); `tests/privacy_provider_test.php` no longer reaches the network
+- **A course creator deployed before its provider no longer breaks every page**
+  The page header hook (`mycourses_header_hook`), the footer hook (`chat_hook`), the file serving callback of `lib.php` and the import task asked `aiprovider_datacurso\local\plugin_settings` for the plugin state, a class that only exists from `aiprovider_datacurso` 1.7.0 (2026110400) on Moodle 4.5 and 2.2.0 on Moodle 5.x. When the code of 2.0.14 reached a site before that provider, every page threw `Class "aiprovider_datacurso\local\plugin_settings" not found`, the login page and the upgrade page that reports the missing dependency included, so the administrator could not log in to run the upgrade. Those callbacks now ask `\local_coursegen\local\provider_state`, which reports the plugin as disabled while the provider class does not exist: the "Create with AI" buttons and the plugin files stay away, and a queued import waits, until the provider is upgraded. Tests: `tests/local/provider_state_test.php`
+- **Confirming a course no longer fails when the AI proposes a category the site does not have**
+  The AI service proposes the category of the new course without knowing the categories of the site. When that category did not exist (for example on a site where category 1 was deleted), the review panel showed an empty category field but kept the confirm button enabled, and confirming failed with *Can't find data record in database table course_categories*: the course was not created, although the generation had already used the credits. The proposed category is now used only when it exists and the user may create courses with AI in it; otherwise the site default category, and then the first category where the user may create, take its place. The review panel starts on that category, the confirm button stays disabled while the category field is empty, and a category picked by the user that no longer exists is refused with a clear message (`error_category_unavailable`). A category picked by the user where they lack a required capability is still refused naming that capability. Tests: `tests/local/service/create_course_category_test.php`, `tests/external/creation_gate_external_test.php`
+
+## Security
+
+- **The text the AI writes is cleaned in a single point before any activity stores it (Mindfree, observation 1)**
+  The text returned by the model is untrusted input, but only the editor objects of an AI result and a few activities (lesson pages and options, quiz question text and feedback) cleaned it, each on its own. Every other string reached the database as the AI wrote it: lesson page titles, book chapter titles, database templates, forum messages, feedback questions, workshop criteria, assignment rubrics, quiz question names and the name of every activity. Some activities show what they store without cleaning it (lesson pages), so a script the AI wrote, for instance after reading a document with hidden instructions, would run in the browser of whoever opened it. `create_mod_service::create_from_ai_result()`, the path every activity takes, from a single activity or from a whole course, now passes the whole AI result through `\local_coursegen\utils\ai_text_sanitiser` before Moodle or any activity settings class stores it: a string with markup is cleaned with `clean_text()` (scripts, event handler attributes and `javascript:` links go, the layout stays), a string that starts with a script scheme (`javascript:`, `vbscript:`) stops being a URL, and any other string is kept as it is. Tests: `tests/ai_text_sanitisation_test.php` (one test per activity type that receives text: page, lesson, book, database, glossary, wiki, forum, feedback, workshop, assignment and quiz), `tests/ai_text_sanitiser_test.php`
+- **An import into an existing course can no longer run twice on the same course (Mindfree, observation 2)**
+  Two imports on the same course could run at once and leave two active courses with the same short name. An import now holds a lock on its target course for its whole length and a second one is refused without changing anything. Tests: `course_import_safety_test::test_concurrent_import_on_the_same_target_is_refused`, `::test_lock_is_per_target_and_released_after_the_import`, `::test_import_held_by_another_process_is_refused` (the other import runs on a second database connection, as another PHP process would)
+- **An import interrupted by the death of its process is rolled back (Mindfree, observation 2)**
+  The import renamed and hid the original course and built a copy, and only undid it when PHP caught an exception: a process that died mid-way (time or memory limit, a restart of the service) left the original renamed and hidden and the copy half done. The rename of the original and the creation of the copy are now recorded in the same transaction that makes them, and an import left running by a dead process is rolled back from that record by the new scheduled task `\local_coursegen\task\recover_interrupted_imports` (every 15 minutes) and before a new import on the same course; an import whose process is alive holds its lock and is left alone. Tests: `course_import_safety_test::test_interrupted_import_is_rolled_back_by_the_scheduled_task`, `::test_recovery_leaves_an_import_at_work_alone`, `::test_import_of_a_dead_process_is_rolled_back_once_its_lock_is_freed` (the database frees the lock when the connection of the other process closes), `::test_retry_of_an_interrupted_import_starts_from_the_original`
+- **A queued import checks the feature and the permissions again when it runs (Mindfree, observation 2)**
+  The queued task checks again that the import is still enabled and that the user may still create courses with AI and import into the target, and marks the import failed instead of failing itself. Tests: `course_import_safety_test::test_task_refuses_once_the_feature_is_disabled`, `::test_task_refuses_once_createcoursewithai_is_gone`, `::test_task_refuses_once_the_target_permissions_are_gone`; `tests/task/import_generated_course_task_test.php` enables the feature it now requires
+- **A failed backup no longer leaves user data behind (Mindfree, observation 2)**
+  A backup of the target that fails no longer leaves the backup, with user data, in the course backup area. Test: `course_import_safety_test::test_failed_backup_leaves_no_stored_backup`
+- **The copy takes the idnumber of the original (Mindfree, observation 2)**
+  The copy now takes the idnumber of the original along with its names, and a rollback gives it back; what refers to the original by its id stays with it, as the README now explains. Tests: `course_import_safety_test::test_copy_takes_the_idnumber_and_keeps_the_roles`, `::test_failed_import_gives_the_idnumber_back`
+- **The import requires the right to change the target course (Mindfree, observation 2)**
+  The import also requires `moodle/course:update`, `moodle/course:changeshortname` and `moodle/course:changefullname` on the target. Tests: `course_import_safety_test::test_import_requires_changing_the_target`; `tests/local/service/import_permissions_test.php` covers the nine capabilities
+- **The importer role is only created when the import is enabled, and never for the whole site (Mindfree, observation 2)**
+  The AI course creator and importer role is only created once the import is enabled, and is assignable on categories and courses instead of the whole site (existing sites are upgraded; assignments already made are kept). Tests: `course_import_safety_test::test_importer_role_only_exists_once_the_feature_is_enabled`, `::test_existing_importer_role_is_no_longer_assignable_site_wide`; `tests/local/role_installer_test.php`
+- **The search of target courses stays cheap in large categories (Mindfree, observation 2)**
+  The search filters by text in the database and checks the permissions of 500 courses at most. Test: `search_target_courses_test::test_search_stops_after_scanning_the_limit_of_courses`, and the existing search tests
+
+## [2.0.14] - 2026-11-06
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.3**.
+
+## Added
+
+- **The plugin can be switched off from the Datacurso AI provider**
+  Site administrators can now switch the plugin off from the Datacurso AI provider (the Enabled switch of Course Creator AI in Site administration > AI > Datacurso plugins list); the plugin has no "Enabled" setting of its own. While it is off, the *Create with AI* button on My courses (or on the Dashboard when My courses is disabled), the *Create course with AI* entry under Site administration > Courses and the activity AI button on course pages are hidden; the course creation page and every web service of the course and activity creation flows refuse with the Datacurso AI provider's message (users are told to contact the administrator, and site administrators get a link to the provider's plugins list); syllabus files are no longer served; and queued imports into an existing course are skipped by cron, which logs *The plugin is disabled in the Datacurso AI provider; skipping.* and keeps the staging course and the queued session. The plugin's administration pages (system instructions and image generation, with its web service) stay available so it can be configured before it is switched on. With the plugin on, nothing changes. Requires `aiprovider_datacurso` 2026110400.
+
+## Changed
+
+- **Creating a course with AI requires a fixed set of four capabilities**
+  The creation permission set added in 2.0.8 also included every capability the `editingteacher` role archetype allows by default, computed at runtime from the installed plugins. It is now exactly `moodle/course:create`, `moodle/course:view`, `local/coursegen:createcoursewithai` and `local/coursegen:createactivitywithai`, so another plugin adding a capability to that archetype never hides the *Create with AI* button from roles created earlier. `local/coursegen:createcoursewithai` is still checked on the system context and the rest on the category the course is created in. The stock `manager` role holds all four, so managers can create courses with AI again; site administrators are unaffected.
+
+## [2.0.13] - 2026-11-04
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.3**.
+
+## Added
+
+- **Dashboard access to the course assistant**
+  On sites with the My courses page disabled (setting `enablemycourses`, Moodle 5.2 and later), the "Create with AI" button is added to the Dashboard, so teachers can still reach the assistant. On Moodle 4.5 to 5.1, which have no such setting and always keep My courses, the Dashboard is left unchanged
+- **Non-admin access to image generation management**
+  Users with `local/coursegen:manageimagegeneration` who are not site administrators can open "Manage image generation"
+
+## Changed
+
+- **Moodle 5.3 is a supported release**
+  `version.php` declared support up to Moodle 5.2, so the plugins page of a Moodle 5.3 site warned that the plugin was outside its tested range. It now declares `[405, 503]`
+
+## Fixed
+
+- **The web service classes use their current names**
+  The external functions, and the tests that call them, used the legacy global names of the web service API (`external_api`, `external_function_parameters`, `external_single_structure`, `external_multiple_structure`, `external_value`). Moodle 4.2 renamed them into `core_external`, and Moodle 5.3 reports every use of the old names as deprecated, which made the tests that load those classes fail. They now import the `core_external` classes, which Moodle 4.5 also has. The test of the client factory gave the provider its licence through the Moodle 4.5 plugin setting only; on Moodle 5.0+ it now creates the enabled provider instance that holds it, so the test runs on both
+- **The templates and the activity chat use the Bootstrap classes of the running Moodle**
+  The image generation settings page, the course creation page, the footer of the activity chat, the add-activity button and the progress and review markup of the activity chat used Bootstrap 4 classes (`custom-control`, `custom-switch`, `custom-checkbox`, `custom-radio`, `custom-select`, `sr-only`, `mr-*`, `ml-*`, `pr-*`, `text-right`, `font-weight-bold`, `badge-light`, `form-group`). Moodle 5.0 moved to Bootstrap 5 and keeps those names only through a deprecated compatibility layer, which outlines them in red as deprecated on Behat sites and in theme designer mode and which a later release removes. Moodle 4.5 ships Bootstrap 4, without the Bootstrap 5 names, so neither set works on both. The class names now come from `\local_coursegen\local\bootstrap_classes`, which gives the Bootstrap 4 names on Moodle 4.5 and the Bootstrap 5 names on Moodle 5.0 and later; PHP passes them to the templates it renders and, through `activityai.init()`, to the JavaScript (`local_coursegen/local/bootstrap_classes`). `form-group` is replaced by `mb-3`, or dropped where `mb-0` already overrode its margin, which renders the same on both
+- **The HTML the AI writes in a lesson is cleaned before it is stored**
+  Release 2.0.9 cleaned the HTML the AI writes in books, quiz questions and database entries, but not in the pages of a lesson, which kept scripts, event attributes and script links. The lesson shows its pages, its answers and their feedback without cleaning them (`noclean`), so they reached the student as written. The content of each page, the text of each option and its feedback are now cleaned the way Moodle cleans text from a person who is not trusted, as in the other activities. The labels of the buttons of a content page are left as they are, since the lesson strips their tags when it shows them
+- **The generated images of lessons, glossaries and wikis reach the activity**
+  The images of these three activities were generated but did not show in the course. The pages of a lesson arrive as plain HTML, which the parameter cleaner does not read, so their images kept the path of the file on the AI service and were never downloaded: they are now downloaded and stored in the page. The images of a glossary entry and of a wiki page were downloaded into a draft area of the user who generated the course and never moved to the activity, so the entry or the page pointed at a missing file until Moodle deleted the draft: a glossary entry now receives its draft area through the `inlineattachmentsid` option, and the images of a wiki page are added to the attachments of its subwiki one by one, since that area is shared by every page of the subwiki and saving the draft area over it would remove the images of the pages created before
+- **The image toggle is respected in the full course flow**
+  With the site image policy disabled or never configured, turning images on in the assistant generated no images at all. The disabled policy is no longer sent, as in the activity flow
+- **A generated course can always be created**
+  Reloading the page after the generation finished showed "I created it in Moodle" and the plan review buttons instead of the course review panel, and accepting again left the session stuck. The session now reopens the course review panel
+- **Cancelling the course review no longer strands the session**
+  A "Review and create the course" button reopens the panel after Cancel
+- **The course summary, section summaries and language are applied**
+  The descriptions sent by the service become the course and section summaries, and the course takes the language chosen in the assistant when its pack is installed
+- **The general section is kept**
+  A plan numbered from section 0 starts at section 1, so the first unit no longer replaces the course's general section
+- **The completed generation message no longer claims the course exists**
+  It now says the content is ready and the course details must be reviewed to create it
+- **Accepting subsections from the decision card is kept after a reload**
+  The session records the choice, so the "+" menu toggle stays on
+- **Image suggestions show what will be generated**
+  Each suggestion shows its description and the part it illustrates
+- **The activity creation response names the course module**
+  `data.cmid` returned the module instance id (or none for books and wikis)
+- **Interface texts**
+  The "Retry" button is translated, a single activity reads "1 activity", and the Spanish strings no longer use voseo
+
+## [2.0.12] - 2026-11-04
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Fixed
+
+- **Starting a course plan no longer fails on sites with an outdated sessions table**
+  On some sites the table that stores course planning sessions kept the `courseid` column as required, or lacked the `coursedata` column, even though earlier upgrade steps should have fixed it. Starting a course plan then failed with the generic message "An error occurred while starting course planning". An upgrade step now checks the real table and only repairs what is wrong, so it is safe on sites that were already correct.
+
+## [2.0.11] - 2026-10-26
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Changed
+- **Requires the provider that sends the build number**
+  The course service now validates the plugin by its build number, which `aiprovider_datacurso` sends in `X-Plugin-Build` from `1.6.4`. The dependency on `aiprovider_datacurso` is raised to `2026102601`, so this plugin cannot be installed or run with a provider older than the release that sends it.
+
+## [2.0.10] - 2026-10-26
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Changed
+
+- **The course service is told which release of this plugin is calling**
+  Every call to the course service now carries `X-Plugin-Name: local_coursegen` and `X-Plugin-Version` (this release). The service can then ask for an update when the release is too old, and the person sees the message from the Datacurso provider instead of a generic error. All the clients are built through `api_client_factory`; a test fails if a class builds one by hand. Requires `aiprovider_datacurso` 1.6.3 or later.
+
+## [2.0.9] - 2026-10-21
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Fixed
+
+- **The text the AI writes is cleaned before it is saved**  
+  Pages, lessons, books, labels, forums, quiz questions and database entries could keep scripts, event attributes or script links if the AI wrote them, for example after reading a document that asked for them. The text is now cleaned the way Moodle cleans any text from a person who is not trusted: scripts, event attributes, script links, frames and forms are removed, while the layout and the inline styles stay. Links of a database URL field must be real addresses (#370)
+
+## [2.0.8] - 2026-10-21
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Added
+
+- **Import the generated course into an existing course**  
+  When the new administrator setting *Allow importing into an existing course* (`local_coursegen/enableimportexisting`, off by default) is enabled, the confirmation panel offers, as its first field, a selector with *Create as a new course* or *Import into an existing course*; in import mode the course name, short name and new-course category fields are hidden because the copy keeps the target course's names. Importing shows a category autocomplete and a course autocomplete filtered by the chosen category through the new `local_coursegen_search_target_courses` external function, which only lists courses the user can back up and restore. The generated course is materialised as a staging course and an adhoc task then copies the target course with its settings, enrolments, roles, groups, grades and user data (native backup/restore with user data, immediate mode; the acting user needs `moodle/backup:userinfo` and `moodle/restore:userinfo`), renames the original with a unique timestamp suffix following the `delete_user()` pattern so the copy keeps the original short and full names, hides the original course, imports the staging content onto the copy — replacing its content (people, roles and groups are kept) or appending the generated sections after the existing ones, including the plan's first section even though the generator stores it as section 0 (the original sections are never merged or renamed), as chosen in the new *Import content mode* administrator setting (`importcontentmode`, default replace) — and deletes the staging course bypassing the recycle bin. On any failure the copy is deleted, the original names and visibility are restored, the generated course is kept reachable from the session and the task is never retried by cron. The confirmation view polls the session state until the import finishes. With the setting disabled the flow is unchanged.
+- **Import execution mode**  
+  The new administrator setting *Import execution* (`local_coursegen/importexecution`, shown only while importing into an existing course is enabled, default *In the background (cron task)*) chooses where the import runs once the staging course is materialised. *In the background* keeps queuing the adhoc task that cron runs, with the confirmation view polling the session state until it finishes, so large courses are safe from request time limits. *In the foreground (same request)* runs the copy and the import inside the `local_coursegen_create_course` request, so no cron is needed, but the request must finish within the web server and browser time limits. The external function now also returns `importstate` (`queued`, `done` or `failed`; empty when no import) and `copycourseid` (the course that replaced the target, only when a foreground import succeeded), and the confirmation view renders the completed or failed import card straight away instead of polling when the state is already terminal.
+- **Recommended roles created automatically**  
+  Installing or upgrading the plugin creates two roles, each only when no role with its shortname exists: *AI course creator (editing teacher)* (`editingteachercoursegenai`), an `editingteacher` archetype role with the archetype defaults plus `moodle/course:create`, `moodle/course:view`, `local/coursegen:createcoursewithai` and `local/coursegen:createactivitywithai`, and *AI course creator and importer* (`editingteachercoursegenimportai`), the same plus `moodle/backup:userinfo` and `moodle/restore:userinfo` so the holder can import generated courses into existing ones. Both are assignable in the System, Course and Activity module contexts and may assign the stock *Non-editing teacher* and *Student* roles; the importer role may also assign the stock *Teacher* (editing teacher) role, so editing teachers of the original course keep their role in the imported copy instead of becoming non-editing teachers. Their names and descriptions are taken from the plugin strings in the site language at creation time, and once created (or if a role with the shortname already existed) they are never modified or removed by the plugin.
+
+## Changed
+
+- **Create course with AI offered only to users holding the full creation permission set**  
+  Creating a complete course with AI now requires every capability the `editingteacher` role archetype allows by default (computed at runtime from the installed plugins' `db/access.php`, so it follows the site's plugins) plus `moodle/course:create`, `moodle/course:view`, `local/coursegen:createcoursewithai` and `local/coursegen:createactivitywithai`, instead of only the last of those with `moodle/course:create`. `local/coursegen:createcoursewithai` is still checked on the system context; the rest on the category the course is created in. The *Create with AI* button on My courses is hidden unless the user holds the full set in at least one category, the creation page refuses a direct URL with the standard permission error naming the missing capability, every web service of the creation flow (`start_course_planning`, `course_planning_feedback`, `get_course_settings`, `get_course_session_state`, `courseai_syllabus_upload`, `courseai_filepicker_init`, `create_course`) refuses too, the category review list only offers categories holding the full set and, when importing into an existing course, the target's category is checked before the import set. The set lives in the new `creation_permissions` service class. Note that the stock `manager` role lacks a few of the archetype's capabilities (for example `mod/choice:choose`, `moodle/block:view`), so managers need them, or a dedicated role, to keep creating courses with AI; site administrators are unaffected.
+- **Import option offered only to users who can complete it**  
+  The *Import into an existing course* selector is rendered only when the setting is on and the user holds the full import capability set (`moodle/backup:backupcourse`, `moodle/restore:restorecourse`, `moodle/course:visibility` and `moodle/backup:userinfo` on the course; `moodle/course:create` and `moodle/restore:userinfo` on its category) on at least one course, instead of to every user who can open the page. The target course search applies the same set, so it only lists courses the import will accept, and the web service and the import task keep checking it on the chosen target. The set lives in the new `import_permissions` service class.
+- **German, French, Indonesian, Portuguese and Russian language packs completed**  
+  The `de`, `fr`, `id`, `pt` and `ru` language packs now include every string of this release (importing into an existing course, import content mode and execution settings, recommended roles) and the strings they were missing from earlier releases, so no English string is shown in those languages.
+
+## Fixed
+
+- **Optional web service parameters declared with a default**  
+  `local_coursegen_create_course` declared `fullname`, `shortname` and `category` as `VALUE_OPTIONAL` with a default value, which Moodle flags with a developer debugging notice on every call and, in isolated PHPUnit runs, raised before the database reset so rows leaked between tests. They are now `VALUE_DEFAULT`; the cleaned parameters and the response are identical.
+- **Site course comparison in the import target check**  
+  `SITEID` is a string in Moodle, so a strict integer comparison could never exclude the site course as an import target; the guard now casts it.
+- **Import help text follows the import content mode**  
+  The help shown under *Import into an existing course* always described a replace, even with *Import content mode* set to append. It is now chosen server-side from `local_coursegen/importcontentmode`: one text explains that the copy's content is replaced (participants, roles and groups are kept, their grades and submissions on the replaced activities are lost), the other that the generated sections are added after the existing ones and nothing is removed; both say the original course is renamed and hidden as a backup.
+
+## [2.0.7] - 2026-10-13
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Fixed
+
+- **Syllabus uploads are validated on the server**  
+  The syllabus endpoint no longer relies on the file picker alone. It now re-checks the extension (PDF, DOCX or TXT), the 10 MB size limit and the real file content before anything is stored or sent to the course service, so a renamed or forged file is rejected with a localized message. The endpoint also validates its context.
+- **Error messages no longer expose technical detail**  
+  The notification shown when the system instruction upload fails is now a localized message; the technical detail stays in developer debugging only.
+
+## Changed
+
+- **Privacy metadata matches the data actually sent**  
+  The external service declaration now lists every field of the outbound requests (planning, activity, feedback and file uploads), and the user id is described as the stable pseudonym that is sent instead of the raw Moodle id.
+- **Syllabus files are covered by the privacy provider**  
+  Users with stored syllabus files are now listed under the system context and their files can be exported and deleted through the privacy API.
+- **Audit events carry less personal data**  
+  The external transfer event stores the file extension, size and generation identifiers instead of the original file name, and applying a generation result to a course is now logged.
+- **Tests**  
+  Added coverage for syllabus upload validation, privacy provider system context handling and a check that outbound payloads match the declared privacy metadata.
+
+## [2.0.6] - 2026-09-30
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.2**.
+
+## Fixed
+
+- **"Create with AI" button missing on My courses in Moodle 5.2**  
+  Moodle 5.2 moved the "Manage courses" and "Create course" buttons from the My courses page header into the Course overview block, so the plugin no longer found the header container it injected its button into and the button silently disappeared for users with enrolled courses. The button is now spliced server side into the page HTML by a `before_http_headers` hook, which starts the output buffer once the page URL, context and login are known (the previous `after_config` buffering ran before any of them were set). It is placed next to core's course action buttons in the page header (Moodle 4.5/5.0), right after the "Create course" form inside the Course overview block (Moodle 5.2) or in the empty-state action bar (all versions), so it is part of the initial page response and does not depend on JavaScript.
+- **Bootstrap 5 compatibility on Moodle 5.0+**  
+  The institutional guideline preview now uses Moodle's `core/modal` API instead of a jQuery Bootstrap 4 modal that never opened on Moodle 5.0, tooltips declare both `data-toggle` and `data-bs-toggle`, and CSS colours fall back from Bootstrap 5 `--bs-*` variables to their Bootstrap 4 names.
+- **Question bank defaults on Moodle 5.0**  
+  Quiz questions are created in the module default category through `question_get_default_category()` on Moodle 5.0, since the previous helper is deprecated there.
+
+## Changed
+
+- **My courses is disabled by default on fresh Moodle 5.2 installs**  
+  The "Create with AI" button on My courses needs that page to be enabled. On a fresh Moodle 5.2 site, enable it in `Site administration > Appearance > Navigation > Enable My courses`; upgraded sites keep their existing setting.
+- **Tests and CI for Moodle 5.0**  
+  The plugin CI workflow installs the DataCurso AI provider from the branch matching each Moodle version, the Behat course page scenarios assert the plugin's own AI button rather than core's activity chooser (renamed on Moodle 5.0), and a plugin data generator seeds institutional guidelines so the preview dialogue is covered by Behat.
+- **Guideline popover and preview markup moved from JavaScript to Mustache templates**  
+  The institutional guideline list, its compact toolbar variant and the preview dialogue body were built as HTML strings inside `amd/src/local/courseai/context/guideline.js`. They are now rendered from `local_coursegen/local/courseai/guideline_list`, `guideline_list_compact` and `guideline_preview` through `core/templates`, so the markup is theme-overridable, escaped by the template engine and covered by PHPUnit; list clicks are delegated on the container and stale renders while typing in the search box are dropped.
+- **Guideline list templates are self-contained listboxes**  
+  `local_coursegen/local/courseai/guideline_list` and `guideline_list_compact` now render the whole `<ul role="listbox">` (with a `listlabel` context variable for its accessible name) instead of bare `<li>` fragments, so they validate on their own and the `.mustachelintignore` exception is gone. The page renders them once through the same partials inside `[data-region="guideline-list"]` / `[data-region="guideline-list-compact"]` wrappers, JavaScript replaces the whole list inside those wrappers and delegates clicks on them; the `#guidelineList` / `#guidelineListCompact` ids are unchanged.
+
+## [2.0.5] - 2026-09-11
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Security
+
+- **DOM XSS closed in the AI streaming render pipelines**  
+  The course planning buffer and the single-activity stream were inserted as HTML after Markdown parsing without sanitization. Both flows are now routed through the plugin's central sanitizer (DOMPurify with a strict tag/attribute allow-list, failing closed to plain text), section names and activity types are escaped or validated against a module allow-list, and the local escaper covers attribute contexts.
+- **Whole-course creation flow now enforces capabilities**  
+  Course confirmation, plan feedback, session state, settings and item regeneration endpoints previously relied on session ownership alone. All of them now require `moodle/course:create` and `local/coursegen:createcoursewithai` inside the method, and the effective target category is validated with `moodle/course:create` at category context before any course is created.
+- **Generation jobs anchored to their owner and consumed once**  
+  Module materialization loads the job by job id, course and user before contacting the provider, takes section and position from the persisted job instead of client parameters, rejects already-consumed jobs (no duplicate activities on replay), adds a unique database index on the job id, and removes a dead legacy class that kept the vulnerable lookup pattern.
+- **Technical exception messages no longer reach the browser**  
+  Five endpoints returned raw exception text. Clients now receive localized generic messages while the technical detail stays in the server debug log; per-activity error messages accumulated during course creation are sanitized as well.
+- **Service URLs require HTTPS**  
+  Both configurable service URLs must use HTTPS to be saved; plain-HTTP local addresses are accepted only while the site runs in developer debugging mode.
+
+## Added
+
+- **Auditable events for AI generation**  
+  Five plugin events — generation job started, external file transfer, generation result applied, generation failure and authorization denial — now leave an audit trail with course, user and job identifiers, never including prompts or personal content.
+- **Complete Privacy API coverage**  
+  The privacy provider declares the external Datacurso AI service location with every transferred field, declares the planning prompt field, exports and deletes syllabus files in all GDPR deletion variants (including plugin uninstall), models course-bound data in course context with a course-deletion cleanup observer, and anonymizes shared site configuration rows instead of destroying them when a user is deleted.
+
+## Fixed
+
+- **Image generation management usable by delegated managers**  
+  The save endpoint of the image generation admin page required `moodle/site:config` while the page itself was gated by `local/coursegen:manageimagegeneration`, leaving non-admin managers with a visible but unusable page. Both now check the same capability.
+- **Institutional guideline name reaches the generation job**  
+  The single-activity stream stored the guideline name from a property the context service never returned, so the stored job always lost it. The correct field is now read.
+- **Missing English strings for the syllabus and planning UI**  
+  Six strings existed only in translations and rendered as `[[key]]` placeholders for English users; they are now defined in the English pack and translated across all supported languages.
+
+## [2.0.4] - 2026-08-27
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **Missing Spanish translations added to the course creation assistant**  
+  The plan review screen, activity generation progress messages, stop/resume/retry controls, and the activity log were showing in English regardless of the site's language, because their strings had no Spanish translation. All of them are now translated.
+
+## [2.0.3] - 2026-08-24
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **Spanish translation corrected across the language file**  
+  Several activity names and UI strings used incorrect literal translations, inconsistent terminology for the same activity type across different strings, and grammar issues. Activity names are now aligned with the site's installed Spanish language pack.
+
+## [2.0.2] - 2026-08-20
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **Workshop settings handle the initial phase and AI-generated criteria**  
+  Workshop activities generated with AI now correctly set the initial submission phase and apply AI-generated assessment criteria, covered by a new test suite.
+
+## [2.0.1] - 2026-08-19
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+
+- **Site H5P framework version sent to the AI service**  
+  New `h5p_core_api` helper resolves the site's H5P core API version and attaches it as `h5p_core_api` to both the single-activity and full-course payloads, so the service packages generated `.h5p` files with a library set compatible with the site's H5P framework. When unresolvable the field is omitted and the service falls back to its most-compatible set.
+- **H5P activity settings applied from the AI result**  
+  New `h5pactivity_settings` class maps the AI's `passing_score` to the activity's pass grade (`gradepass`) idempotently and emits debugging for unconsumed settings keys.
+- **H5P activities properly labeled in the course plan UI**  
+  Plan cards now show "H5P interactive content" with its own icon instead of a raw "H5pactivity" label with no icon.
+- **Automated test coverage for the H5P generation flow**  
+  New PHPUnit suites covering the creation contract, permissions, download configuration and H5P settings, plus testable fixtures and three Behat features for the activity AI modal, activity generation and course generation flows.
+
+## Changed
+
+- **API client construction centralized**  
+  New `api_client_factory` builds the provider HTTP client honoring the configured service URL overrides, with a PHPUnit-only injection seam, replacing scattered direct instantiations.
+
+## Fixed
+
+- **Enrolled users could launch paid AI generation jobs**  
+  `create_mod_stream`, `create_mod` and the activity feedback, file upload and filepicker endpoints now require `moodle/course:manageactivities` and `local/coursegen:createactivitywithai` on the course, matching the UI entry point. Previously being enrolled was enough to start jobs that consume service credits via direct AJAX calls.
+- **Disabled image policy no longer overrides the teacher's image toggle**  
+  A disabled (or never configured) site image policy is now omitted from the activity payload instead of being sent, where it suppressed the activity description image even when the teacher enabled images. Guarded by a dedicated regression test.
+- **Generated package download hardened**  
+  `file_path`/`file_name` from the AI response are sanitized before download (also for SCORM, IMS CP and resource packages), missing package fields are validated with a clear error, the downloaded `.h5p` package is validated before the activity is created, and a failed download produces a clear error without leaving residue — the full-course flow continues with the remaining activities.
+- **Unknown or disabled module types rejected with clear errors**  
+  An AI result naming a module type that is not installed or is disabled on the site is now rejected with a translated error message instead of failing silently, and the parameter-class resolver emits a diagnostic when no handler matches. New lang strings: `error_invalid_package`, `error_missing_package_info`, `error_module_disabled`.
+- **Failed generation can be retried**  
+  Initialization failures are now retriable from the chat UI: when no session exists yet, the retry replays the original prompt from scratch.
+- **Plugin CI runs the PHPUnit suite against its provider dependency**  
+  The CI workflow now installs `aiprovider_datacurso` (the declared hard dependency) before running the test suite, and the codebase was cleaned to pass Moodle CodeSniffer with zero errors.
+- **Version bump**  
+  Internal version bumped to **2026081801** and release bumped to **2.0.1**.
+
+## [2.0.0] - 2026-08-14
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+
+- **Database activities are now fully built by the AI**  
+  New `data_settings` mod settings class creates the AI-generated database fields through mod_data's native field API, seeds the AI example entries, applies the AI-designed display templates, and sorts the activity by its primary field. Field creation is hardened against per-field failures, only choice values matching the defined options are stored, and non-numeric example values for number fields are skipped.
+- **Folder activities ingest AI-generated documents**  
+  New `folder_parameters` class downloads every AI-generated document into a single draft area — each at its planned subfolder path — and points the folder's `files` parameter at it, so the standard module creation places every file and its nested folders into the folder's content. When no files were produced the folder is simply created empty.
+
+## Changed
+
+- **Image policy builder extracted into its own domain class**  
+  The site-wide image policy assembly moved from `course_planning_service` into the new shared `image_policy_builder` class under `classes/local/image_generation/`, so the full-course flow and the single-activity flow build the exact same `image_policy` payload from a single place.
+- **Minimum required version of `aiprovider_datacurso` raised to 2026081000**  
+  The image policy payload sent by this release requires the matching provider support. This breaking dependency requirement is the reason for the major version bump.
+- **Version bump**  
+  Internal version bumped to **2026081800** and release bumped to **2.0.0**.
+
+## Fixed
+
+- **Calculated question datasets validated before any write**  
+  Calculated question datasets are now validated before anything is written, so a question with invalid datasets is skipped cleanly even inside an outer transaction instead of leaving partial data behind.
+- **Silent discard of unhandled module settings**  
+  A `mod_settings` payload arriving for a module type with no handler class now emits a debugging warning instead of being silently ignored.
+
+## [1.7.3] - 2026-08-13
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **Global image settings were ignored in the single-activity flow**  
+  When creating a single activity with "Create with AI" and the image generation option enabled, the payload sent to the AI service included only the image toggle (`with_images`) and never the site-wide image generation policy, so the global settings (generation mode, per-activity enables, and per-part image caps) had no effect on standalone activities. The activity payload now includes the same `image_policy` object the full-course flow already sends, built by the shared `image_policy_builder::build()`. Requires the matching AI service change; older services ignore the field.
+- **Version bump**  
+  Internal version bumped to **2026081300** and release bumped to **1.7.3**.
+
+## [1.7.2] - 2026-08-12
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **AI-generated rubric was silently discarded**  
+  When the user asked for an assignment graded with a rubric, the AI service generated the full rubric and sent it in `mod_settings.rubric`, but the plugin had no `assign_settings` class, so the rubric was never created and the assignment was left on the rubric grading method with no definition ("rubric not defined"). A new `assign_settings` mod settings class now creates the rubric definition through Moodle's advanced grading API (`gradingform_rubric`), marks it ready, and activates the rubric method only after the definition exists — if creation fails, the assignment degrades to simple direct grading instead of becoming ungradeable.
+- **Version bump**  
+  Internal version bumped to **2026081202** and release bumped to **1.7.2**.
+
+## [1.7.1] - 2026-08-12
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Fixed
+
+- **File-type catalog was missing from the full-course flow**  
+  The site file-type group catalog (`filetype_groups`) introduced in 1.7.0 was only attached to the standalone activity payload (`/activity/init`), so assignments generated inside a full course could not restrict accepted file types against the site's real groups. The catalog builder now lives in a shared `filetype_catalog_service` and is attached to the course planning payload as well. Requires the matching AI service change; older services ignore the field.
+- **Version bump**  
+  Internal version bumped to **2026081201** and release bumped to **1.7.1**.
+
+## [1.7.0] - 2026-08-12
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Changed
+
+- **Site file-type catalog sent to the AI service**  
+  The activity generation payload (`/activity/init`) now includes `filetype_groups`: the site's real file-type group catalog (group key and its extensions) built from `\core_form\filetypes_util::get_groups_info()`, custom file types included. This lets the AI service infer the accepted file types for an assignment from the described deliverable (e.g. "upload a short video" restricts submissions to the `video` group) and validate the generated value against groups that actually exist on the site, instead of assuming the stock Moodle catalog. If the catalog cannot be resolved, the field is omitted and the service falls back to the standard Moodle groups. Requires the matching AI service change to take effect; older services ignore the field.
+- **Version bump**  
+  Internal version bumped to **2026081200** and release bumped to **1.7.0**.
+
+## [1.6.0] - 2026-06-02
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Changed
+
+- **Course review panel before creation**  
+  Added a review step in the streaming UI that shows AI-generated course settings (fullname, shortname, category) before the course is created. Users can override any value. The category selector uses Moodle's `form-autocomplete` with full path display (e.g. "Miscellaneous / My Subcategory").
+- **New `get_course_settings` webservice**  
+  Added `local_coursegen_get_course_settings` (read, ajax) that returns the AI-generated course fullname, shortname, category, and the full category list with paths — all from the server via `core_course_category::make_categories_list()`.
+- **Create course accepts overrides**  
+  The `local_coursegen_create_course` webservice now accepts optional `fullname`, `shortname`, and `category` parameters. When provided, they override the AI-generated values.
+- **Version bump**  
+  Internal version bumped to **2026081101** and release bumped to **1.6.0**.
+
+## Fixed
+
+- **Transcript and plan card described the same activity differently**  
+  The plan card showed the detailed description an activity was planned with — what the student submits, the instructions, the criteria — while the transcript beside it showed only the one-line summary written before the activity was detailed. Both now show the detailed one, falling back to the summary for an activity that has not been detailed yet.
+- **Markdown shown raw in the plan cards**  
+  Activity descriptions, and the chapter and question lines inside an expanded activity, were written into the page as plain text. Anything the model emphasised therefore arrived with its asterisks visible, for example `**[assign] Digital Culture Case Study Analysis**: Students will research…`. All three now render through the bundled `marked`, inline so the markup nests correctly inside the paragraph it already sits in.
+- **Rendered plan text is sanitised with DOMPurify**  
+  The HTML produced from the model's Markdown was cleaned with regular expressions, which removed dangerous tags and inline event handlers but let a `javascript:` link through. DOMPurify is now bundled as an AMD module (`local_coursegen/purify`) alongside `marked` and cleans against an allow-list, so a link can only carry a safe URL. Moodle ships no sanitiser for JavaScript; the one in `theme_boost` is a theme's private copy of Bootstrap's internals, differs between the themes on a site, and still uses Bootstrap 4's parameter name.
+- **Chat transcript rebuilt out of order after a page reload**  
+  On reload the conversation was rebuilt by replaying only the user's messages and appending a single closing assistant line. Every instruction the user sent after the plan was therefore printed above the planned-structure card instead of below it, and the assistant's intermediate turns were missing entirely. The transcript is now rebuilt round by round in checkpoint order, closing each answered round with the same message the live stream used, and the feed switches to the post-plan container as soon as the plan card is rebuilt so later turns keep their place.
+- **Conversation transcript lost on reload**  
+  Reloading rebuilt the conversation from the free text of the user's messages alone, so every turn that depended on what an action actually did came back wrong or not at all: "You applied: move «Basics» after «Advanced»", "You added activity: …", the regenerated subtree of a replan, and the assistant's own turns. The service now records the transcript turn by turn and the plugin replays it, so a reload shows what was on screen. Sessions started before the service records it fall back to the previous rebuild. Requires the matching AI service change.
+- **Pending proposals lost on reload**  
+  A session paused on a set of proposals (for example a reordering the assistant offered) came back from a reload with the options gone, because the snapshot never carried them. The pending review payload is now read from the session state and the proposals card is re-rendered, so the choice the user was asked to make is still there. Requires the matching AI service change.
+- **AI course creation menu entry no longer shown to users who cannot use it**  
+  **Site administration > Courses > Create a new course with AI** declared only `local/coursegen:createcoursewithai`, while the page itself requires that capability *and* `moodle/course:create`. Because `admin_externalpage` treats its capability list as OR, a user holding only the plugin capability was shown the entry and then denied access on click. The entry is now registered only when both capabilities are held in the system context.
+
+## [1.5.0] - 2026-06-01
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Changed
+
+- **Course creation data now comes from API response**  
+  The `create_course` external function is now a thin controller that only validates params and loads the session. All business logic (coursedata parsing, category resolution, course data building) moved to `create_course_service`. Course data is built entirely from the API's `course_configuration` response instead of the session's stored coursedata.
+- **Removed restrictive shortname sanitization**  
+  Removed `sanitize_shortname_keyword()` which limited shortnames to alphanumeric+hyphens. Shortnames from the API are used directly (trimmed, truncated to 100 chars).
+- **Removed `course_identity` references**  
+  Renamed `apply_course_identity_to_coursedata` to `build_course_data_from_api` and updated all references from `course_identity` to `course_configuration`.
+- **Session coursedata no longer includes course fields**  
+  Removed `category`, `fullname`, and `shortname` from the session's `coursedata` payload in `start_course_planning` — these come from the API at creation time.
+- **Planning UI spinner-to-checkmark transition**  
+  Added `finalizePlanView` to transition the planning loading spinner to a done/checkmark state when streaming completes.
+- **Planning overlay hidden on review state**  
+  Fixed a bug where the centered planning-loading overlay remained visible during detailed planning review.
+- **Version bump**  
+  Internal version bumped to **2026060101** and release bumped to **1.5.0**.
+
+## [1.4.0] - 2026-05-14
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Changed
+
+- **Refactored webservice layer: thin controllers + service classes**  
+  Renamed `wizard_init` to `start_course_planning`, extracting all business logic into `course_planning_service`. The external function now acts as a thin controller that validates params and delegates to services.
+- **Full frontend rename: `wizard` → `courseai`**  
+  Renamed all AMD modules, Mustache template, CSS selectors, DOM IDs, and JS function/variable names from `wizard` to `courseai` for naming consistency across the codebase.
+- **Language string keys renamed**  
+  All `wizard_*` language string keys renamed to `courseai_*` across all 7 supported locales.
+- **Removed hard-stop for unconfigured API URLs**  
+  Removed validation that blocked Generate when `datacurso_service_url` settings were empty, allowing the API client to use its default fallback.
+- **New light sidebar for course navigation**  
+  Added a light/minimalist sidebar overlay panel that includes:
+  - Logo-branded trigger in the navbar (hover reveals menu icon)
+  - "New course" shortcut button
+  - "Recent" section showing the last 5 in-progress sessions
+  - "View all courses" button that switches to a paginated sessions grid (10/page) inside the wizard
+  - Backdrop overlay when open, click to close
+  - Sidebar slides over the entire page including the navbar (z-index 1040)
+  - Separate `sidebar.css` for maintainability
+  - New `get_user_inprogress_sessions()` method on `course_session_service`
+  - Sidebar closes automatically on any navigation click
+- **Version bump**  
+  Internal version bumped to **2026051406** and release bumped to **1.4.0**.
+- **Refined chat UI during planning/streaming**  
+  Full-height sticky left panel with initial prompt shown as a chat history bubble. Compact chat controls are now icon-focused to prevent horizontal scroll. Borders removed from textarea, chat card, toolbar, and message bubble for a cleaner look. A light dividing line separates the chat panel from stream content.
+- **Fixed stream content scroll**  
+  Removed `max-height: 380px` constraint and `overflow: hidden` on `pc-details-panel` and review cards so the right column scrolls as one unit, no longer clipping stream output.
+- **Removed floating sidebar toggle**  
+  Removed the absolute-positioned toggle button that caused horizontal page scroll. Sidebar remains accessible via navbar trigger only.
+
+## [1.3.3] - 2026-04-10
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **Automated prompt-based course creation service**
+  Added a dedicated backend automation service to orchestrate end-to-end course creation from prompt context, including planning/execution/result stages and user enrolment when applicable.
+- **Centralized result application service**
+  Added a dedicated result service to apply remote AI course results in a structured and reusable way.
+
+## Changed
+- **More resilient remote automation flow**
+  Improved planning stream handling, execute retries, and result polling to better tolerate transient backend/network issues during automated creation.
+- **Completion enforcement support in module creation flow**
+  Extended module manager parameter handling to support manual completion enforcement during internal automation paths.
+- **Version bump**
+  Internal version bumped to **2026041000** and release version bumped to **1.3.3**.
+
+## Fixed
+- **Static analysis and coding-style compliance**
+  Updated PHPDoc parameter annotations and long-line formatting in automation/privacy files to satisfy CI checks (PHPDoc Checker and Codechecker).
+- **Language pack consistency cleanup**
+  Normalized language files formatting for repository consistency.
+
+## [1.3.2] - 2026-01-26
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **Optional admin settings for DataCurso service URLs**  
+  Added admin settings to optionally override the default DataCurso service base URLs for the **standard** service and the **EU-hosted** service.
+- **Translations for service URL settings**  
+  Added language strings for `datacurso_service_url` and `datacurso_service_url_eu` across supported locales.
+- **CHANGES.md for version history**  
+  Added a new **CHANGES.md** file to maintain a clear, versioned history of releases and changes.
+
+## Changed
+- **AI API client respects configured service URLs when provided**  
+  Updated `ai_course_api` initialization to use the configured DataCurso service URLs when available, falling back to defaults otherwise.
+- **Version bump**  
+  Internal version bumped to **2026012300** and release version bumped to **1.3.2**.
+
+
+## [1.3.1] - 2025-12-16
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **AI response language selector on the course form**  
+  Added a new **AI response language** field to the course generation form (autocomplete from Moodle’s language list), with a help button and a sensible default based on the current user language.
+- **Per-course persistence of the selected language**  
+  The selected language is stored in the course context record so it can be reused across AI interactions (planning, messaging, and execution).
+- **Translations for the language selector**  
+  Added language strings across supported locales for the language selector on course form.
+
+## Changed
+- **AI request payloads now include `lang` when available**  
+  Course planning, message, and execute requests now send the selected language code so the backend can return AI output in the configured language.
+- **Course context save flow extended**  
+  Updated context saving to persist the selected language alongside context type, system instruction, and prompt/syllabus data.
+- **Documentation updated**  
+  Updated the README to document the new **AI response language** control in the Datacurso section.
+- **Version bump**  
+  Internal version bumped to **2025121601** and release version bumped to **1.3.1**.
+
+## [1.3.0] - 2025-12-11
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **Optional image generation support for AI course planning**  
+  Added a new course form setting to optionally enable AI image generation for planned courses. The option is disabled by default and, when enabled, is passed as a boolean flag to the course planning API.
+- **Translations for image generation controls on the course form**  
+  Introduced language strings for the new image generation setting so the course form remains fully localized.
+
+## Changed
+- **Course planning API payload extended**  
+  The course planning request now includes an `image generation` flag, allowing the backend AI planning service to respect the course-level configuration.
+- **Documentation and configuration examples updated**  
+  Updated the README to document how to configure and use the new image generation option on the course form.
+- **Version bump**  
+  Internal version bumped to **2025121100** and release version bumped to **1.3.0**.
+
+## [1.2.1] - 2025-12-09
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+ 
+ ## Fixed
+ 
+  - Fixes an issue where the AI course-creation modal didn’t appear because course view URL validation was too strict.  
+  - The previous logic required an exact path match to `/course/view.php`, which failed on subdirectory installs like `https://mysite.com/mymoodle/`.  
+  - Updated the detection to use a substring check with `strpos()` for `/course/view.php`, so URL variations and extra path components are handled correctly.
+
+## [1.2.0] - 2025-12-05
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **Optional system instruction support**
+  System instructions can now be enabled via a checkbox as an optional complement to other context types, with conditional validation and selection when enabled.
+- **Improved navigation for system instruction editing**
+  Breadcrumbs/navigation were enhanced to make editing system instructions clearer.
+
+## Changed
+- **Terminology and entity rename: “model” → “system instruction”**
+  Renamed classes, form fields, parameters, context type constants, DB table references, and API endpoints to use “system instruction” terminology across the codebase.
+- **System instruction workflow integrated into context flow**
+  System instructions are no longer a standalone context type; they’re integrated as an optional step after choosing a context type.
+- **Form UX reordered**
+  Reordered fields to: context type selector → custom prompt → syllabus upload → system instruction checkbox/selector.
+- **Course planning API call updated**
+  Simplified course planning to use the v2 API
+- **Version bump**
+  Internal version bumped to **2025120500** and release bumped to **1.2.0**.
+- **Documentation and translations refreshed**
+  Updated README, images, and language strings to match the new system instruction terminology and flow.
+
+## Fixed
+- **Help text improved**
+  Clarified help text for the custom prompt textarea.
+- **Coding standards cleanup**
+  Addressed PHPCS line-length and spacing issues.
+- **Privacy provider tests aligned**
+  Updated privacy provider tests to reference the renamed system instruction table.
+
+## [1.0.3] - 2025-12-02
+
+**Compatibility note:** This version is compatible from **Moodle 4.5** to **Moodle 5.1**.
+
+## Added
+- **Automated release workflow for the plugin.**  
+  A new GitHub Actions workflow was added to streamline/automate Moodle plugin releases.
+- **Support from moodle 4.5 to 5.1**  
+  Added `$plugin->supported` in `version.php` to declare Moodle compatibility from 4.5 to 5.1
+
+## Changed
+- **Release bump to 1.0.3**  
+  The plugin release number was updated to **1.0.3**.
+

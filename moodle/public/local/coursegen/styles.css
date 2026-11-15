@@ -1,0 +1,143 @@
+
+.local_coursegen_p {
+    font-size: 14px;
+    margin: 0;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+}
+
+/* Plugin Loading */
+
+@keyframes lds-ring {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+span.local_coursegen-sparkles-icon {
+    display: inline-block;
+}
+
+span.local_coursegen-sparkles-icon.white {
+    display: none;
+}
+
+.local_coursegen-add-activity-ai-button:not([disabled]):hover {
+    color: #fff;
+}
+
+.local_coursegen-add-activity-ai-button:not([disabled]):hover span.local_coursegen-sparkles-icon {
+    display: none;
+}
+
+.local_coursegen-add-activity-ai-button:not([disabled]):hover span.local_coursegen-sparkles-icon.white {
+    display: inline-block;
+}
+
+.local_coursegen-add-activity-ai-button span.local_coursegen-sparkles-icon img.icon {
+    display: block;
+}
+
+/* General container */
+.local_coursegen_ai_chat {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Messages area */
+
+/* Bubbles */
+
+/* “Typing…” */
+
+@keyframes local_coursegen_ai_blink {
+
+    0%,
+    80%,
+    100% {
+        opacity: .2;
+        transform: translateY(0);
+    }
+
+    40% {
+        opacity: 1;
+        transform: translateY(-2px);
+    }
+}
+
+/* Form */
+
+.divider .divider-content {
+    display: flex;
+    column-gap: 1rem;
+}
+
+.btn.add-content.section-modchooser {
+    min-width: 34px;
+}
+
+/* New styles */
+
+/* Input group */
+
+/* Textarea takes full width */
+.local_coursegen_ai_textarea {
+    resize: none;
+    border-radius: .5rem;
+    padding: .6rem .75rem;
+    font-size: 0.95rem;
+    background: var(--bs-white, var(--white, #fff));
+    color: var(--bs-dark, var(--dark, #212529));
+}
+
+/* Send button with fixed width */
+.local_coursegen_ai_send {
+    flex: 0 0 42px;
+    height: 42px;
+    border: none;
+    border-radius: .5rem;
+    background-color: var(--bs-primary, var(--primary, #0d6efd));
+    color: var(--bs-white, var(--white, #fff));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+}
+
+.local_coursegen_ai_send:hover {
+    background-color: var(--bs-blue, var(--blue, #0d6efd));
+}
+
+/* Icon */
+.local_coursegen_ai_send svg {
+    pointer-events: none;
+}
+
+/* AI Course Modal Styles */
+.local_coursegen_course_ai_modal .modal-dialog {
+    max-width: 75vw;
+    width: 75vw;
+    margin: 1.75rem auto;
+}
+
+.local_coursegen_course_ai_modal .modal-content {
+    height: calc(100vh - 3.5rem);
+    display: flex;
+    flex-direction: column;
+}
+
+.local_coursegen_course_ai_modal .local_coursegen_ai_chat {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Activity AI Modal Styles - Consistent with Course AI Modal */

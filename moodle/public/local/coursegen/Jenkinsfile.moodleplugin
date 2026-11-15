@@ -1,0 +1,4 @@
+@Library('moodle-ci') _
+moodlePluginCI(moodleVersions: [
+  [version: 'MOODLE_503_STABLE', dbs: ['mariadb']],
+])

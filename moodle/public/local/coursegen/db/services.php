@@ -1,0 +1,160 @@
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+/**
+ * External functions and service declaration for DataCurso
+ *
+ * Documentation: {@link https://moodledev.io/docs/apis/subsystems/external/description}
+ *
+ * @package    local_coursegen
+ * @category   webservice
+ * @copyright  2025 Wilber Narvaez <https://datacurso.com>
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+
+defined('MOODLE_INTERNAL') || die();
+
+$functions = [
+    'local_coursegen_create_mod' => [
+        'classname' => 'local_coursegen\external\create_mod',
+        'methodname' => 'execute',
+        'description' => 'Create module for ask question to chatbot based in that information',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:manageactivities,local/coursegen:createactivitywithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_create_mod_stream' => [
+        'classname' => 'local_coursegen\external\create_mod_stream',
+        'methodname' => 'execute',
+        'description' => 'Start streaming job to create module with AI and store job_id',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:manageactivities,local/coursegen:createactivitywithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_create_course' => [
+        'classname' => 'local_coursegen\external\create_course',
+        'methodname' => 'execute',
+        'description' => 'Create course with AI assistance',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_get_course_settings' => [
+        'classname' => 'local_coursegen\external\get_course_settings',
+        'methodname' => 'execute',
+        'description' => 'Get final AI-generated course settings (fullname, shortname, category) for review',
+        'type' => 'read',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_course_planning_feedback' => [
+        'classname' => 'local_coursegen\external\course_planning_feedback',
+        'methodname' => 'execute',
+        'description' => 'Send human feedback for AI course planning session',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_activity_feedback' => [
+        'classname' => 'local_coursegen\\external\\activity_feedback',
+        'methodname' => 'execute',
+        'description' => 'Send human feedback for AI activity generation job',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:manageactivities,local/coursegen:createactivitywithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_activity_filepicker_init' => [
+        'classname' => 'local_coursegen\\external\\activity_filepicker_init',
+        'methodname' => 'execute',
+        'description' => 'Initialise filepicker draft area for AI activity file uploads',
+        'type' => 'read',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:manageactivities,local/coursegen:createactivitywithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_activity_file_upload' => [
+        'classname' => 'local_coursegen\\external\\activity_file_upload',
+        'methodname' => 'execute',
+        'description' => 'Upload a file for an AI activity generation thread',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:manageactivities,local/coursegen:createactivitywithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_manage_image_generation' => [
+        'classname' => 'local_coursegen\\external\\manage_image_generation',
+        'methodname' => 'execute',
+        'description' => 'Save image generation settings for course and activity creation',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'local/coursegen:manageimagegeneration',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_start_course_planning' => [
+        'classname' => 'local_coursegen\\external\\start_course_planning',
+        'methodname' => 'execute',
+        'description' => 'Start AI course planning session',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_courseai_syllabus_upload' => [
+        'classname' => 'local_coursegen\\external\\courseai_syllabus_upload',
+        'methodname' => 'execute',
+        'description' => 'Upload syllabus file for courseai session',
+        'type' => 'write',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_courseai_filepicker_init' => [
+        'classname' => 'local_coursegen\\external\\courseai_filepicker_init',
+        'methodname' => 'execute',
+        'description' => 'Initialise filepicker draft area for courseai syllabus upload',
+        'type' => 'read',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    // Note: local_coursegen\external\regenerate_detailed_item is deliberately not
+    // declared as a web service. Its upstream endpoint no longer exists, so the
+    // class is unreachable from the browser and is kept only until it is removed.
+    'local_coursegen_get_course_session_state' => [
+        'classname' => 'local_coursegen\\external\\get_course_session_state',
+        'methodname' => 'execute',
+        'description' => 'Get resumable state for an AI course session',
+        'type' => 'read',
+        'ajax' => true,
+        'capabilities' => 'moodle/course:create,local/coursegen:createcoursewithai',
+        'loginrequired' => true,
+    ],
+    'local_coursegen_search_target_courses' => [
+        'classname' => 'local_coursegen\\external\\search_target_courses',
+        'methodname' => 'execute',
+        'description' => 'Search courses in a category the user may import an AI-generated course into',
+        'type' => 'read',
+        'ajax' => true,
+        'capabilities' => 'local/coursegen:createcoursewithai,moodle/course:create',
+        'loginrequired' => true,
+    ],
+];

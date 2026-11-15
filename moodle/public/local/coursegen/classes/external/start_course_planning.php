@@ -1,0 +1,152 @@
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+namespace local_coursegen\external;
+
+use aiprovider_datacurso\local\plugin_settings;
+use context_system;
+use core_external\external_api;
+use core_external\external_function_parameters;
+use core_external\external_single_structure;
+use core_external\external_value;
+use local_coursegen\event\generation_failed;
+use local_coursegen\event\generation_job_started;
+use local_coursegen\local\service\course_planning_service;
+use local_coursegen\local\service\creation_permissions;
+
+defined('MOODLE_INTERNAL') || die();
+
+require_once($CFG->libdir . '/externallib.php');
+
+/**
+ * External function to start an AI course planning session.
+ *
+ * @package    local_coursegen
+ * @copyright  2026 Wilber Narvaez <https://datacurso.com>
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+class start_course_planning extends external_api {
+    /**
+     * Returns description of method parameters.
+     *
+     * @return external_function_parameters
+     */
+    public static function execute_parameters(): external_function_parameters {
+        return new external_function_parameters([
+            'prompt' => new external_value(PARAM_RAW, 'Course description prompt'),
+            'lang' => new external_value(PARAM_TEXT, 'Language code (es, en, etc.)', VALUE_DEFAULT, 'es'),
+            'withimages' => new external_value(PARAM_BOOL, 'Include image suggestions', VALUE_DEFAULT, false),
+            'systeminstructionid' => new external_value(
+                PARAM_INT,
+                'System instruction ID (optional)',
+                VALUE_DEFAULT,
+                0
+            ),
+            'withsubsections' => new external_value(PARAM_BOOL, 'Organise sections into subsections', VALUE_DEFAULT, false),
+        ]);
+    }
+
+    /**
+     * Start courseai session and create course planning thread.
+     *
+     * @param string $prompt Course description.
+     * @param string $lang Language code.
+     * @param bool $withimages Include image suggestions.
+     * @param int $systeminstructionid System instruction ID.
+     * @param bool $withsubsections Organise sections into subsections.
+     * @return array
+     * @throws \moodle_exception plugindisabled or plugindisabled_admin when the plugin is disabled.
+     */
+    public static function execute(
+        string $prompt,
+        string $lang = 'es',
+        bool $withimages = false,
+        int $systeminstructionid = 0,
+        bool $withsubsections = false
+    ): array {
+        global $USER;
+
+        plugin_settings::require_enabled('local_coursegen');
+
+        $params = self::validate_parameters(self::execute_parameters(), [
+            'prompt' => $prompt,
+            'lang' => $lang,
+            'withimages' => $withimages,
+            'systeminstructionid' => $systeminstructionid,
+            'withsubsections' => $withsubsections,
+        ]);
+
+        $context = context_system::instance();
+        self::validate_context($context);
+        creation_permissions::require_anywhere();
+
+        try {
+            $outcome = course_planning_service::start_course_planning(
+                $params['prompt'],
+                $params['lang'],
+                (bool)$params['withimages'],
+                (int)$params['systeminstructionid'],
+                (int)$USER->id,
+                (bool)$params['withsubsections']
+            );
+
+            // Audit the started job. The prompt is personal content and never
+            // travels in the event payload.
+            if (!empty($outcome['success'])) {
+                generation_job_started::create([
+                    'context' => $context,
+                    'other' => [
+                        'job_id' => (string)($outcome['threadid'] ?? ''),
+                        'session_id' => (int)($outcome['sessionid'] ?? 0),
+                        'generate_images' => (int)$params['withimages'],
+                    ],
+                ])->trigger();
+            }
+
+            return $outcome;
+        } catch (\Exception $e) {
+            // Keep the technical detail in developer debugging only: the client
+            // receives a localized message without internal information.
+            debugging('Unexpected error while starting course planning: ' . $e->getMessage());
+            generation_failed::create([
+                'context' => $context,
+                'other' => ['reason' => get_class($e)],
+            ])->trigger();
+            return [
+                'success' => false,
+                'sessionid' => 0,
+                'threadid' => '',
+                'streamingurl' => '',
+                'message' => get_string('error_starting_course_planning', 'local_coursegen'),
+            ];
+        }
+    }
+
+    /**
+     * Returns description of method result value.
+     *
+     * @return external_single_structure
+     */
+    public static function execute_returns(): external_single_structure {
+        return new external_single_structure([
+            'success' => new external_value(PARAM_BOOL, 'Whether the operation succeeded'),
+            'sessionid' => new external_value(PARAM_INT, 'Moodle session ID'),
+            'threadid' => new external_value(PARAM_TEXT, 'Datacurso API thread ID'),
+            'streamingurl' => new external_value(PARAM_TEXT, 'Datacurso API stream URL'),
+            'message' => new external_value(PARAM_TEXT, 'Success or error message'),
+        ]);
+    }
+}

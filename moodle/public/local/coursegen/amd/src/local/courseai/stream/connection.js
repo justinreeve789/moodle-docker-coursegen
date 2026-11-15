@@ -1,0 +1,208 @@
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+/**
+ * EventSource lifecycle management for the SSE stream.
+ *
+ * Knows nothing about event types — delegates all routing to routeEvent.
+ *
+ * @module     local_coursegen/local/courseai/stream/connection
+ * @copyright  2026 Wilber Narvaez <https://datacurso.com>
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+
+import {routeEvent} from './handlers';
+import {
+    hideWorkingIndicator,
+    showWorkingIndicator,
+} from 'local_coursegen/local/courseai/ui/feedback-progress';
+
+/** Maximum number of stale-done retries before giving up. */
+const MAX_STALE_RETRIES = 3;
+
+/** Delay in milliseconds between stale-done retries. */
+const STALE_RETRY_DELAY_MS = 2000;
+
+/**
+ * Open an EventSource connection and wire message, done, and error listeners.
+ *
+ * The ctx.flags.contentReceived flag is reset to false here and set to true
+ * by any structural content event handler (section, activity, token, etc.).
+ * The 'done' listener uses it to detect stale-done races and retry.
+ *
+ * @param {string}   streamUrl      SSE endpoint URL
+ * @param {number}   retryAttempt   Current retry count (0 on first open)
+ * @param {Object}   ctx            Per-stream context object (see handlers.js for shape)
+ * @param {Function} openSSEStream  The outer openSSEStream function (for stale-done retry)
+ */
+export const openConnection = (streamUrl, retryAttempt, ctx, openSSEStream) => {
+    const {
+        state, detailedUi, streamMode,
+        setCompactChatState, deps,
+        typingCursor, planningSpinner, pcStep, pcSubtitle, texts,
+    } = ctx;
+
+    // Reset per-attempt content flag.
+    ctx.flags.contentReceived = false;
+
+    state.sseSource = new EventSource(streamUrl);
+
+    // Show a working indicator the instant the stream opens, so the left panel is
+    // NEVER blank between the prompt turn and the first server status (the first
+    // status can take a while). handleStatus updates this SAME entry in place as
+    // statuses arrive, so the message is continuous — it only changes when the
+    // next one is ready, and is cleared only when real content lands. Skip if an
+    // indicator is already present (e.g. feedback's "Analyzing your request…").
+    if (!document.getElementById('cgFeedbackThinking')) {
+        showWorkingIndicator(texts);
+    }
+
+    // Serialize handlers so SSE events are processed STRICTLY in arrival order.
+    // EventSource does NOT await an async 'message' listener, so two events that
+    // arrive back-to-back run their async handlers concurrently — and a slower
+    // one can finish AFTER a later event and undo its work. Concretely: a fast
+    // reorder emits `status` then `review_needed`; handleStatus awaits
+    // localizeMessage and re-showed the "working" indicator AFTER
+    // handleReviewNeeded had already cleared it, leaving it stuck. Chaining each
+    // routeEvent on the previous keeps ordering and fixes that class of races.
+    let eventQueue = Promise.resolve();
+    state.sseSource.addEventListener('message', (event) => {
+        let data = null;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            return;
+        }
+        // This attempt produced a real message, so a following 'done' is NOT a
+        // stale buffered one (the stale-done guard only fires when a 'done'
+        // arrives with NO message before it). Set it SYNCHRONOUSLY — before the
+        // async queue — so a fast adjustment (e.g. reorder, which emits only
+        // status + review_needed and no content events) is never retried, which
+        // was duplicating the "I finished planning" milestone.
+        ctx.flags.contentReceived = true;
+        eventQueue = eventQueue.then(() => routeEvent(data, ctx)).catch(() => {});
+    });
+
+    state.sseSource.addEventListener('done', () => {
+        ctx.closeStream();
+
+        // Stale-done guard: a 'done' with no content means the previous stream's
+        // buffered 'done' arrived before the new content (Pausar + Regenerar race).
+        // Retry automatically up to MAX_STALE_RETRIES times.
+        if (!ctx.flags.contentReceived && retryAttempt < MAX_STALE_RETRIES) {
+            setTimeout(
+                () => openSSEStream(streamUrl, retryAttempt + 1, streamMode),
+                STALE_RETRY_DELAY_MS
+            );
+            return;
+        }
+
+        // Terminal 'done' (no retry): drop the live working indicator so it can
+        // never linger when the stream closes without a lifecycle event.
+        hideWorkingIndicator();
+        if (typeof ctx.hideStreamBar === 'function') {
+            ctx.hideStreamBar();
+        }
+        if (typingCursor) {
+            typingCursor.classList.add('hidden');
+        }
+        if (streamMode === 'generating') {
+            ctx.markAllDone();
+        }
+        if (planningSpinner) {
+            planningSpinner.classList.add('done');
+        }
+        // Safety net: enable action controls in case review_needed didn't cover newly created controls.
+        if (typeof detailedUi.enableAllActionControls === 'function') {
+            detailedUi.enableAllActionControls();
+        }
+        // Stream completed normally — keep chat disabled during generating phase.
+        if (streamMode !== 'generating') {
+            state.isStreaming = false;
+            // Defer the composer-enable behind the event queue. This 'done' listener
+            // runs SYNCHRONOUSLY, outside the async message queue, so it can fire
+            // BEFORE a just-arrived review_needed has been processed. At that instant
+            // the decision overlay is not visible yet, so setCompactChatState('enabled')
+            // would surface the composer for one frame until review_needed hides it —
+            // a 1-frame flash. Chaining onto eventQueue runs the enable AFTER
+            // review_needed settles, so we skip it entirely once a review has claimed
+            // the bottom slot (cg-plan-reviewed). The safety-net enable still fires when
+            // the stream ended WITHOUT a review (stale/dead stream), so the user is
+            // never left without a composer.
+            eventQueue = eventQueue.then(() => {
+                if (!document.body.classList.contains('cg-plan-reviewed')) {
+                    setCompactChatState(deps, 'enabled');
+                }
+            });
+        }
+    });
+
+    state.sseSource.onerror = () => {
+        // EventSource auto-reconnects on TRANSIENT drops (proxy/idle timeout between
+        // sparse planning events). The browser fires 'onerror' with readyState
+        // CONNECTING while it silently retries — this is NOT fatal. Treating it as
+        // fatal (hiding the indicator, enabling chat, showing a connection error)
+        // made the LEFT panel flap to blank every few seconds during slow phases.
+        // Keep everything alive while reconnecting; only CLOSED is a real failure.
+        if (state.sseSource && state.sseSource.readyState === EventSource.CONNECTING) {
+            return;
+        }
+        state.isStreaming = false;
+        // Connection dropped — clear the live working indicator so it does not
+        // stay pinned forever on abnormal stream termination.
+        hideWorkingIndicator();
+        if (typeof ctx.hideStreamBar === 'function') {
+            ctx.hideStreamBar();
+        }
+        if (typingCursor) {
+            typingCursor.classList.add('hidden');
+        }
+        if (planningSpinner) {
+            planningSpinner.classList.add('done');
+        }
+        if (pcStep) {
+            pcStep.textContent = texts.courseai_state_error;
+        }
+        if (pcSubtitle) {
+            pcSubtitle.textContent = texts.courseai_error_connection;
+        }
+        // Surface the connection error as a permanent danger turn in the log.
+        if (typeof ctx.emitLog === 'function') {
+            ctx.emitLog({
+                actor: 'ai',
+                kind: 'danger',
+                message: (texts && texts.courseai_error_connection) || 'Connection error. Please try again.',
+            });
+        }
+        // Offer a retry button so the user can re-open the stream without reloading.
+        if (state.streamingurl && typeof ctx.openSSEStream === 'function') {
+            const feed = document.getElementById('cgLogAfter') || document.getElementById('cgLog');
+            if (feed && !feed.querySelector('.cg-retry-btn')) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'cg-retry-btn btn btn-warning btn-sm mt-2';
+                btn.textContent = (texts && texts.courseai_retry) || 'Retry';
+                btn.addEventListener('click', () => {
+                    btn.remove();
+                    state.isStreaming = true;
+                    ctx.openSSEStream(state.streamingurl, 0, ctx.streamMode, true);
+                });
+                feed.appendChild(btn);
+            }
+        }
+        // Connection error — re-enable compact chat for retry.
+        setCompactChatState(deps, 'enabled');
+    };
+};

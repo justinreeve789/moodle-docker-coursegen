@@ -1,0 +1,235 @@
+<?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+namespace aiprovider_datacurso\local\sync;
+
+use aiprovider_datacurso\httpclient\datacurso_api;
+use aiprovider_datacurso\local\outbound_privacy;
+
+/**
+ * Keeps the local consumption mirror table up to date from the external Datacurso API.
+ *
+ * The consumption history lives in the external service, but Report Builder can only query a
+ * local DB table. This service is called when the report page is opened: it pulls the records
+ * created since the last synced one (or performs a full backfill on the first run) into
+ * {aiprovider_datacurso_consumption}, so the report always renders fresh data without cron.
+ *
+ * @package    aiprovider_datacurso
+ * @copyright  2025 Josue <https://datacurso.com>
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+class consumption_sync {
+    /** @var string Local mirror table. */
+    private const TABLE = 'aiprovider_datacurso_consumption';
+
+    /** @var string Config holding the fingerprint of the licence the mirror was filled for. */
+    private const LICENCE_CONFIG = 'consumption_licence';
+
+    /** @var int Records requested per API page. */
+    private const PAGE_SIZE = 500;
+
+    /** @var int Safety ceiling of pages processed in a single run (guards against runaway loops). */
+    private const MAX_PAGES = 200;
+
+    /**
+     * Sync new consumption records from the external API into the local mirror table.
+     *
+     * Failures are swallowed (logged as debugging) so the report still renders with whatever is
+     * already stored locally when the external service is unavailable.
+     *
+     * @param datacurso_api|null $client Optional API client override, used by tests.
+     */
+    public static function sync(?datacurso_api $client = null): void {
+        global $DB;
+
+        // Serialise concurrent syncs (e.g. two admins opening the page at once).
+        $lockfactory = \core\lock\lock_config::get_lock_factory('aiprovider_datacurso_consumption_sync');
+        $lock = $lockfactory->get_lock('sync', 0);
+        if (!$lock) {
+            return;
+        }
+
+        try {
+            self::discard_history_of_another_licence($DB);
+            self::pull($DB, $client);
+        } catch (\Throwable $e) {
+            debugging('aiprovider_datacurso consumption sync failed: ' . $e->getMessage(), DEBUG_DEVELOPER);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Empty the mirror when it was filled with the history of a licence that is no longer in force.
+     *
+     * The history belongs to the licence the requests are made with, but the mirror keeps a single
+     * watermark (the highest external id stored). After a licence change the old rows kept being
+     * reported and the history of the new licence, whose ids may be lower, was never pulled. The
+     * fingerprint of the licence the mirror belongs to is kept next to it; when it differs from the
+     * licence in force, the rows are dropped so the history of the new licence is pulled in full.
+     * Removing the licence is a change too: with no licence in force nothing of the mirror is shown.
+     *
+     * @param \moodle_database $db
+     */
+    private static function discard_history_of_another_licence(\moodle_database $db): void {
+        $current = \aiprovider_datacurso\local\license_region::fingerprint();
+
+        // An unset marker is not the same as an empty one: rows stored before the marker existed
+        // belong to an unknown licence.
+        $mirrorof = get_config('aiprovider_datacurso', self::LICENCE_CONFIG);
+        if ($mirrorof === $current) {
+            return;
+        }
+
+        $db->delete_records(self::TABLE);
+        set_config(self::LICENCE_CONFIG, $current, 'aiprovider_datacurso');
+    }
+
+    /**
+     * Fetch and store every record newer than the last one already stored.
+     *
+     * @param \moodle_database $db
+     * @param datacurso_api|null $client Optional API client override, used by tests.
+     */
+    private static function pull(\moodle_database $db, ?datacurso_api $client = null): void {
+        $lastid = (int) $db->get_field_sql('SELECT MAX(externalid) FROM {' . self::TABLE . '}');
+
+        $client = $client ?? new datacurso_api();
+        $newrecords = [];
+        $seen = [];
+        $reachedknown = false;
+
+        for ($page = 1; $page <= self::MAX_PAGES && !$reachedknown; $page++) {
+            $response = $client->get('/tokens/historial-consumos', [
+                'page' => $page,
+                'limit' => self::PAGE_SIZE,
+                'shor' => 'id_consumo',
+                'shor_dir' => 'desc',
+            ]);
+
+            if (empty($response) || ($response['status'] ?? '') !== 'success') {
+                break;
+            }
+
+            $items = self::extract_items($response);
+            if (empty($items)) {
+                break;
+            }
+
+            foreach ($items as $item) {
+                $externalid = (int) ($item['id_consumo'] ?? 0);
+                if ($externalid <= 0) {
+                    continue;
+                }
+                if ($externalid <= $lastid) {
+                    $reachedknown = true;
+                    break;
+                }
+                if (isset($seen[$externalid])) {
+                    continue;
+                }
+                $seen[$externalid] = true;
+                $newrecords[] = self::map_record($item);
+            }
+
+            $totalpages = (int) ($response['paginacion']['total_paginas'] ?? 1);
+            if ($page >= $totalpages) {
+                break;
+            }
+        }
+
+        if (!empty($newrecords)) {
+            $db->insert_records(self::TABLE, $newrecords);
+        }
+    }
+
+    /**
+     * Map a raw external consumption item to a local record.
+     *
+     * @param array $item
+     * @return \stdClass
+     */
+    private static function map_record(array $item): \stdClass {
+        $record = new \stdClass();
+        $record->externalid = (int) ($item['id_consumo'] ?? 0);
+        $record->userid = self::resolve_userid($item['userid'] ?? ($item['id_usuario'] ?? 0));
+        // Services are component names (local_coursegen) and actions are route paths (/assign/answer):
+        // anything else the shop sends is stripped before it is stored.
+        $record->service = clean_param((string) ($item['id_servicio'] ?? ''), PARAM_ALPHANUMEXT);
+        $record->action = clean_param((string) ($item['accion'] ?? ''), PARAM_PATH);
+        $record->credits = (float) ($item['cantidad_tokens'] ?? 0);
+        $record->balance = (float) ($item['saldo_restante'] ?? 0);
+        $record->timecreated = self::to_timestamp($item['created_at'] ?? ($item['fecha'] ?? ''));
+        return $record;
+    }
+
+    /**
+     * Map the userid echoed by the shop to a local user id.
+     *
+     * The shop returns whatever the site sent: a raw id for history rows written before the
+     * pseudonymisation, or the site-scoped pseudonym afterwards. Pseudonym detection comes first,
+     * so a pseudonym is never cast to an integer: one made of digits only (32 of them) would
+     * otherwise become PHP_INT_MAX, and one with leading digits would attribute the consumption
+     * to the wrong user. A shorter all-digit value is a legacy raw id. Anything else is user 0.
+     *
+     * @param mixed $value Raw value of the userid field.
+     * @return int Local user id, or 0 when it cannot be attributed.
+     */
+    private static function resolve_userid($value): int {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return 0;
+        }
+        if (outbound_privacy::is_pseudonym($value)) {
+            return outbound_privacy::resolve_pseudonym($value) ?? 0;
+        }
+        if (ctype_digit($value)) {
+            return (int) $value;
+        }
+        return 0;
+    }
+
+    /**
+     * Parse an external date/datetime string into a Unix timestamp.
+     *
+     * @param mixed $value
+     * @return int
+     */
+    private static function to_timestamp($value): int {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return 0;
+        }
+        $timestamp = strtotime($value);
+        return $timestamp !== false ? $timestamp : 0;
+    }
+
+    /**
+     * Flatten the raw consumption items (across all users) from a historial-consumos response.
+     *
+     * @param array $response
+     * @return array<int, array>
+     */
+    private static function extract_items(array $response): array {
+        $items = [];
+        foreach (($response['usuarios'] ?? []) as $user) {
+            foreach (($user['consumos'] ?? []) as $consumption) {
+                $items[] = $consumption;
+            }
+        }
+        return $items;
+    }
+}
